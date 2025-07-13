@@ -58,7 +58,10 @@ def create_graph_prompt(data,
 
 
 def predict(dataset, model="gpt-4.1-mini", no_graph=False, no_user=False):
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+    if model[0:3] == "gpt":
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+    else:
+        client = OpenAI(base_url="http://localhost:8000/v1", api_key="token-abc123")
 
     results = []
     for data, text in tqdm(zip(dataset, dataset.text)):
@@ -69,11 +72,13 @@ def predict(dataset, model="gpt-4.1-mini", no_graph=False, no_user=False):
                 model=model,
                 messages=[{"role": "system", "content": system_prompt},
                           {"role": "user", "content": graph_prompt}],
-                temperature=0.0,
-                max_tokens=10
+                temperature=0.0
             )
-            label_pred = response.choices[0].message.content.strip()
-            binary_pred = 1 if label_pred.lower() == 'fake' else 0
+            output = response.choices[0].message.content
+            if "<think>" in output:
+                output = output.split("</think>")[-1]
+            label_pred = output.strip().lower()
+            binary_pred = 1 if label_pred == 'fake' else 0
         except Exception as e:
             print(f"Error with model {model}: {e}")
             binary_pred = -1

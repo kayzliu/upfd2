@@ -1,2 +1,2 @@
-python exp.py --path /Users/kayzliu/GNN-FakeNews/data/ --name politifact --method llm --model gpt-4.1-mini --no-graph
-python exp.py --path /Users/kayzliu/GNN-FakeNews/data/ --name politifact --method llm --model gpt-4.1-mini --no-user
+python exp.py --name politifact --method llm --model gpt-4.1-mini --no-graph
+python exp.py --name politifact --method llm --model gpt-4.1-mini --no-user
