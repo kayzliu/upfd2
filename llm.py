@@ -20,7 +20,7 @@ Output: respond with only the fakes news classification label: 'Real' or 'Fake'.
 
 def create_graph_prompt(data,
                         text,
-                        max_content_len=2000,
+                        max_content_len=500,
                         max_edges=100,
                         no_graph=False,
                         no_user=False):
@@ -33,6 +33,9 @@ def create_graph_prompt(data,
             prompt += f"{content[:max_content_len]}...\n"
         else:
             prompt += f"{content}\n"
+        if i >= max_edges:
+            prompt += f"and {data.num_edges - max_edges} more nodes.\n"
+            break
         if no_user:
             prompt += "No user post content and propagation graph provided.\n"
             return prompt
@@ -42,12 +45,9 @@ def create_graph_prompt(data,
     if no_graph:
         prompt += "No graph structure provided.\n"
     else:
-        if data.num_edges > max_edges:
-            src_nodes = data.edge_index[0][:max_edges]
-            dst_nodes = data.edge_index[1][:max_edges]
-        else:
-            src_nodes = data.edge_index[0]
-            dst_nodes = data.edge_index[1]
+        src_nodes = data.edge_index[0][:max_edges]
+        dst_nodes = data.edge_index[1][:max_edges]
+
         for src, dst in zip(src_nodes, dst_nodes):
             prompt += f"Node {src} propagate to Node {dst},\n"
 
@@ -57,7 +57,7 @@ def create_graph_prompt(data,
     return prompt
 
 
-def predict(dataset, model="gpt-4.1-mini", no_graph=False, no_user=False):
+def predict(dataset, model="gpt-4.1-nano", no_graph=False, no_user=False):
     if model[0:3] == "gpt":
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
     else:
@@ -78,10 +78,10 @@ def predict(dataset, model="gpt-4.1-mini", no_graph=False, no_user=False):
             if "<think>" in output:
                 output = output.split("</think>")[-1]
             label_pred = output.strip().lower()
-            binary_pred = 1 if label_pred == 'fake' else 0
+            binary_pred = 1 if label_pred.startswith('fake') else 0
         except Exception as e:
             print(f"Error with model {model}: {e}")
-            binary_pred = -1
+            binary_pred = 0
 
         results.append(binary_pred)
 
