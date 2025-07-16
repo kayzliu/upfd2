@@ -25,7 +25,7 @@ def graph_encoder(data,
                   no_graph=False,
                   no_user=False,
                   max_content_len=500,
-                  max_edges=100):
+                  max_edges=30):
     prompt = "Input:\n"
 
     for i, content in enumerate(text):
@@ -80,7 +80,7 @@ def example_encoder(dataset, class_examples=0, no_graph=False, no_user=False):
     return prompt
 
 
-def predict(path,
+def run_llm(path,
             name,
             model="gpt-4.1-nano",
             thinking=False,
@@ -133,7 +133,6 @@ def predict(path,
 
         label.append(data.y.item())
         pred.append(binary_pred)
-        print(binary_pred)
 
     return {
         "acc": accuracy_score(label, pred),
