@@ -1,11 +1,12 @@
 import pygod
 import torch
 import torch.nn.functional as F
+from torch import Tensor
 from torch.nn import Linear
-from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATConv, GCNConv, SAGEConv, global_max_pool
 from torch_geometric.transforms import ToUndirected
-from vllm import LLM
+from transformers import AutoTokenizer, AutoModel
+from sklearn.metrics import accuracy_score, f1_score
 
 from dataset import UPFD2
 
@@ -54,21 +55,31 @@ def get_instruct(node_type, query):
     return f'Instruct: {task}\nQuery:{query}'
 
 
+def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
+    left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+    if left_padding:
+        return last_hidden_states[:, -1]
+    else:
+        sequence_lengths = attention_mask.sum(dim=1) - 1
+        batch_size = last_hidden_states.shape[0]
+        return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
+
+
 def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B", gnn='SAGE', no_graph=False, no_user=False, gpu=0):
-    llm = LLM(model=emb_model, task="embed")
+    tokenizer = AutoTokenizer.from_pretrained(emb_model, padding_side='left')
+    model = AutoModel.from_pretrained(emb_model)
 
-    train_set = UPFD2(path, name, 'train', ToUndirected())
-    val_set = UPFD2(path, name, 'val', ToUndirected())
-    test_set = UPFD2(path, name, 'test', ToUndirected())
+    train_set = UPFD2(path, name, 'train')
+    val_set = UPFD2(path, name, 'val')
+    test_set = UPFD2(path, name, 'test')
 
-    train_loader = DataLoader(train_set, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=128, shuffle=False)
-    test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
+    # train_loader = DataLoader(train_set, batch_size=128, shuffle=True)
+    # val_loader = DataLoader(val_set, batch_size=128, shuffle=False)
+    # test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
 
     device = pygod.utils.validate_device(gpu)
 
-    gnn = Net(gnn, train_set.num_features, 128,
-                train_set.num_classes, concat=True).to(device)
+    gnn = Net(gnn, 4096, 128, 2, concat=True).to(device)
     optimizer = torch.optim.Adam(gnn.parameters(), lr=0.001,
                                  weight_decay=0.01)
 
@@ -76,47 +87,57 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B", gnn='SAGE', no_grap
         gnn.train()
 
         total_loss = 0
-        for data in train_loader:
+        total_correct = 0
+        for data, text in train_set:
             data = data.to(device)
             optimizer.zero_grad()
 
-            queries = [get_instruct(i, r) for i, r in enumerate(g.text) for g in data]
-            outputs = llm.embed(queries)
-            data.x = torch.tensor([o.outputs.embedding for o in outputs])
+            queries = [get_instruct(i, r) for i, r in enumerate(text)]
+
+            batch_dict = tokenizer(
+                queries,
+                padding=True,
+                truncation=True,
+                max_length=8192,
+                return_tensors="pt",
+            )
+
+            batch_dict.to(model.device)
+            outputs = model(**batch_dict)
+            data.x = last_token_pool(outputs.last_hidden_state,
+                                         batch_dict['attention_mask'])
 
             out = gnn(data.x, data.edge_index, data.batch)
             loss = F.nll_loss(out, data.y)
             loss.backward()
             optimizer.step()
-            total_loss += float(loss) * data.num_graphs
+            total_loss += loss.item()
 
-        loss = total_loss / len(train_loader.dataset)
+            pred = out.argmax(dim=-1)
+            total_correct += int((pred == data.y).sum())
 
-        gnn.eval()
+        loss = total_loss / len(train_set)
+        train_acc = total_correct / len(train_set)
 
-        total_correct = total_examples = 0
-        for data in train_loader:
+        total_correct = 0
+        for data in val_set:
             data = data.to(device)
             pred = gnn(data.x, data.edge_index, data.batch).argmax(dim=-1)
             total_correct += int((pred == data.y).sum())
-            total_examples += data.num_graphs
-        train_acc = total_correct / total_examples
+        val_acc = total_correct / len(val_set)
 
-        total_correct = total_examples = 0
-        for data in val_loader:
+        total_correct = 0
+        for data in test_set:
             data = data.to(device)
             pred = gnn(data.x, data.edge_index, data.batch).argmax(dim=-1)
+            label = data.y.cpu().numpy()
             total_correct += int((pred == data.y).sum())
-            total_examples += data.num_graphs
-        val_acc = total_correct / total_examples
-
-        total_correct = total_examples = 0
-        for data in test_loader:
-            data = data.to(device)
-            pred = gnn(data.x, data.edge_index, data.batch).argmax(dim=-1)
-            total_correct += int((pred == data.y).sum())
-            total_examples += data.num_graphs
-        test_acc = total_correct / total_examples
+        test_acc = total_correct / len(test_set)
 
         print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, '
               f'Val: {val_acc:.4f}, Test: {test_acc:.4f}')
+
+    return {
+        "acc": accuracy_score(label, pred),
+        "f1": f1_score(label, pred),
+    }

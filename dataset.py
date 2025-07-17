@@ -1,3 +1,4 @@
+import copy
 import csv
 import json
 import os.path as osp
@@ -6,10 +7,8 @@ from typing import Callable, List, Optional
 import numpy as np
 import torch
 
-from torch_geometric.data import (
-    Data,
-    InMemoryDataset,
-)
+from torch_geometric.data import Data, InMemoryDataset
+from torch_geometric.data.separate import separate
 from torch_geometric.io import fs, read_txt_array
 from torch_geometric.utils import coalesce, cumsum
 
@@ -115,12 +114,27 @@ class UPFD2(InMemoryDataset):
             data, self.slices, data_cls = out
 
         text = json.load(open(path[:-3]+"_text.json", "r", encoding="utf-8"))
-        data["text"] = text
+        self.text = text
 
         if not isinstance(data, dict):  # Backward compatibility.
             self.data = data
         else:
             self.data = data_cls.from_dict(data)
+
+    def get(self, idx: int):
+
+        data = separate(
+            cls=self._data.__class__,
+            batch=self._data,
+            idx=idx,
+            slice_dict=self.slices,
+            decrement=False,
+        )
+
+        self._data_list = self.len() * [None]
+        self._data_list[idx] = copy.copy(data)
+
+        return data, self.text[idx]
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({len(self)}, name={self.name})'

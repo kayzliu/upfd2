@@ -66,7 +66,7 @@ def example_encoder(dataset, class_examples=0, no_graph=False, no_user=False):
     prompt = "EXAMPLES:\n\n"
 
     class_cnt = {'Real': 0, 'Fake': 0}
-    for data, text in zip(dataset, dataset.text):
+    for data, text in dataset:
         label = "Fake" if data.y.item() else "Real"
         if class_cnt[label] >= class_examples:
             continue
@@ -110,7 +110,7 @@ def run_llm(path,
     # Prediction on the test set
     label, pred = [], []
     test_set = UPFD2(root=path, name=name, split='test')
-    for data, text in tqdm(zip(test_set, test_set.text)):
+    for data, text in tqdm(test_set):
         graph_prompt = graph_encoder(data, text, no_graph, no_user)
         user_prompt = example_prompt + graph_prompt
 

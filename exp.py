@@ -1,7 +1,7 @@
 import argparse
 
 from llm import run_llm
-from upfd import run_gnn
+from gnn import run_gnn
 
 
 def main(args):
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--path", type=str, default="./data", help="path for the dataset")
     parser.add_argument("--name", type=str, default="politifact", choices=['politifact', 'gossipcop', 'fakeddit'], help="Dataset name")
     parser.add_argument("--method", type=str, default="gnn", choices=['zero-shot', 'thinking', 'one-shot', 'two-shot', 'three-shot', 'gnn'], help="Method for experiment")
-    parser.add_argument("--llm", type=str, default="Qwen/Qwen3-8B", help="LLM model to use for predictions")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B", help="LLM model to use for predictions")
     parser.add_argument("--gpu", type=int, default=0, help="GPU index for CUDA, -1 for CPU")
     parser.add_argument("--no-graph", action="store_true", help="Disable graphical output")
     parser.add_argument("--no-user", action="store_true", help="Disable user post content in prompts")
