@@ -47,11 +47,13 @@ class Net(torch.nn.Module):
         return h.log_softmax(dim=-1)
 
 
-def get_instruct(node_type, query):
+def get_instruct(node_type, query, max_content_len=500):
     if node_type == 0:
         task = "Given a news, generate a semantic embedding for fake news detection."
     else:
         task = "Given a user post, generate a semantic embedding for fake news detection."
+    if len(query) > max_content_len:
+        query = query[:max_content_len] + "..."
     return f'Instruct: {task}\nQuery:{query}'
 
 
@@ -65,17 +67,19 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 
-def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B", gnn='SAGE', no_graph=False, no_user=False, gpu=0):
+def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
+            gnn='SAGE',
+            no_graph=False,
+            no_user=False,
+            max_content_len=500,
+            max_edges=30,
+            gpu=0):
     tokenizer = AutoTokenizer.from_pretrained(emb_model, padding_side='left')
-    model = AutoModel.from_pretrained(emb_model)
+    model = AutoModel.from_pretrained(emb_model, device_map='auto')
 
     train_set = UPFD2(path, name, 'train')
     val_set = UPFD2(path, name, 'val')
     test_set = UPFD2(path, name, 'test')
-
-    # train_loader = DataLoader(train_set, batch_size=128, shuffle=True)
-    # val_loader = DataLoader(val_set, batch_size=128, shuffle=False)
-    # test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
 
     device = pygod.utils.validate_device(gpu)
 
@@ -92,7 +96,10 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B", gnn='SAGE', no_grap
             data = data.to(device)
             optimizer.zero_grad()
 
-            queries = [get_instruct(i, r) for i, r in enumerate(text)]
+            queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
+            if len(queries) > max_edges:
+                queries = queries[:max_edges]
+                data.edge_index = data.edge_index[:, :max_edges]
 
             batch_dict = tokenizer(
                 queries,
