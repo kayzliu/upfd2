@@ -68,9 +68,9 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 
-def load_emb(path, name, emb_model="Qwen/Qwen3-Embedding-8B", max_content_len=500, max_edges=30, batch_size=5):
+def load_emb(path, name, emb_model="Qwen/Qwen3-Embedding-8B", max_content_len=500, max_edges=30):
 
-    fpath = os.path.join(path, name, f"{emb_model.split('/'[-1])}_{max_content_len}_{max_edges}.pt") if path and name else ""
+    fpath = os.path.join(path, name, f"{emb_model.split('/')[-1]}_{max_content_len}_{max_edges}.pt") if path and name else ""
     if os.path.exists(fpath):
         set_emb = torch.load(fpath)
     else:
@@ -99,13 +99,15 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             gnn='SAGE',
             no_graph=False,
             no_user=False,
+            max_content_len=500,
+            max_edges=30,
             gpu=0):
 
     train_set = UPFD2(path, name, 'train')
     val_set = UPFD2(path, name, 'val')
     test_set = UPFD2(path, name, 'test')
 
-    train_emb, val_emb, test_emb = load_emb(path, name, emb_model)
+    train_emb, val_emb, test_emb = load_emb(path, name, emb_model, max_content_len, max_edges)
 
     device = pygod.utils.validate_device(gpu)
 
@@ -121,7 +123,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             data = data.to(device)
             x = x.to(device)
             optimizer.zero_grad()
-            out = gnn(x, data.edge_index)
+            out = gnn(x, data.edge_index[:, :max_edges])
             loss = F.binary_cross_entropy_with_logits(out, data.y.float())
             loss.backward()
             optimizer.step()
@@ -136,7 +138,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
         for (data, _), x in zip(val_set, val_emb):
             data = data.to(device)
             x = x.to(device)
-            out = gnn(x, data.edge_index)
+            out = gnn(x, data.edge_index[:, :max_edges])
             label.append(data.y.item())
             pred.append((out >= 0.5).long().item())
         val_acc = accuracy_score(label, pred)
@@ -146,7 +148,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
         for (data, _), x in zip(test_set, test_emb):
             data = data.to(device)
             x = x.to(device)
-            out = gnn(x, data.edge_index)
+            out = gnn(x, data.edge_index[:, :max_edges])
             label.append(data.y.item())
             pred.append((out >= 0.5).long().item())
         test_acc = accuracy_score(label, pred)
@@ -157,7 +159,4 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
               f'Val: acc: {val_acc:.4f}, f1: {val_f1:.4f} | '
               f'Test: acc: {test_acc:.4f}, f1: {test_f1:.4f}')
 
-    return {
-        "acc": test_acc,
-        "f1": test_f1,
-    }
+    return {"acc": test_acc, "f1": test_f1,}
