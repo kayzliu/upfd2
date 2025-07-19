@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Linear
+from torch_geometric.data import DataLoader
 from torch_geometric.nn import GATConv, GCNConv, SAGEConv, global_max_pool
 from torch_geometric.transforms import ToUndirected
 from transformers import AutoTokenizer, AutoModel
@@ -13,7 +14,7 @@ from dataset import UPFD2
 
 class Net(torch.nn.Module):
     def __init__(self, gnn, in_channels, hidden_channels, out_channels,
-                 concat=False):
+                 concat=True):
         super().__init__()
         self.concat = concat
 
@@ -32,7 +33,7 @@ class Net(torch.nn.Module):
 
     def forward(self, x, edge_index):
         h = self.conv1(x, edge_index).relu()
-        h = global_max_pool(h)
+        h = h.max(dim=-2)[0]
 
         if self.concat:
             news = x[0]
@@ -40,7 +41,7 @@ class Net(torch.nn.Module):
             h = self.lin1(torch.cat([news, h], dim=-1)).relu()
 
         h = self.lin2(h)
-        return h.log_softmax(dim=-1)
+        return h
 
 
 def get_instruct(node_type, query, max_content_len=500):
@@ -63,6 +64,29 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 
+def text_encoder(dataset, tokenizer, model, max_content_len=500, max_edges=30, batch_size=5):
+    for data, text in enumerate(dataset):
+        text = text[:max_edges + 1]
+        data.edge_index = data.edge_index[:, :max_edges]
+        queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
+        dataloader = DataLoader(queries, batch_size=batch_size)
+        emb = []
+        for batch in dataloader:
+            batch_dict = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=256,
+                return_tensors="pt")
+
+            batch_dict.to(model.device)
+            outputs = model(**batch_dict)
+            x = last_token_pool(outputs.last_hidden_state,
+                             batch_dict['attention_mask']).detach().cpu()
+            emb.append(x)
+        data.x = torch.cat(emb, dim=0)
+
+
 def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             gnn='SAGE',
             no_graph=False,
@@ -78,70 +102,61 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
     val_set = UPFD2(path, name, 'val')
     test_set = UPFD2(path, name, 'test')
 
+    print("Encoding text data...")
+    for dataset in [train_set, val_set, test_set]:
+        text_encoder(dataset, tokenizer, model, max_content_len, max_edges)
+
+    del tokenizer
+    del model
+
     device = pygod.utils.validate_device(gpu)
 
-    gnn = Net(gnn, 4096, 128, 2, concat=True).to(device)
-    optimizer = torch.optim.Adam(gnn.parameters(), lr=0.001,
-                                 weight_decay=0.01)
+    gnn = Net(gnn, 4096, 128, 1).to(device)
+    optimizer = torch.optim.Adam(gnn.parameters(), lr=0.001, weight_decay=0.01)
 
     for epoch in range(60):
         gnn.train()
 
         total_loss = 0
-        total_correct = 0
+        label, pred = [], []
         for data, text in train_set:
             data = data.to(device)
             optimizer.zero_grad()
-
-            queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
-            if len(queries) > max_edges:
-                queries = queries[:max_edges+1]
-                data.edge_index = data.edge_index[:, :max_edges]
-
-            batch_dict = tokenizer(
-                queries,
-                padding=True,
-                truncation=True,
-                max_length=8192,
-                return_tensors="pt",
-            )
-
-            batch_dict.to(model.device)
-            outputs = model(**batch_dict)
-            data.x = last_token_pool(outputs.last_hidden_state,
-                                     batch_dict['attention_mask']).detach()
-
             out = gnn(data.x, data.edge_index)
-            loss = F.nll_loss(out, data.y)
+            loss = F.binary_cross_entropy_with_logits(out, data.y.float())
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-
-            pred = out.argmax(dim=-1)
-            total_correct += int((pred == data.y).sum())
-
+            label.append(data.y.item())
+            pred.append((out >= 0.5).long().item())
         loss = total_loss / len(train_set)
-        train_acc = total_correct / len(train_set)
+        train_acc = accuracy_score(label, pred)
+        train_f1 = f1_score(label, pred)
 
-        total_correct = 0
-        for data in val_set:
+        label, pred = [], []
+        for data, text in val_set:
             data = data.to(device)
-            pred = gnn(data.x, data.edge_index, data.batch).argmax(dim=-1)
-            total_correct += int((pred == data.y).sum())
-        val_acc = total_correct / len(val_set)
+            out = gnn(data.x, data.edge_index)
+            label.append(data.y.item())
+            pred.append((out >= 0.5).long().item())
+        val_acc = accuracy_score(label, pred)
+        val_f1 = f1_score(label, pred)
 
-        total_correct = 0
-        for data in test_set:
+        label, pred = [], []
+        for data, text in test_set:
             data = data.to(device)
-            pred = gnn(data.x, data.edge_index, data.batch).argmax(dim=-1)
-            label = data.y.cpu().numpy()
-            total_correct += int((pred == data.y).sum())
-        test_acc = total_correct / len(test_set)
+            out = gnn(data.x, data.edge_index)
+            label.append(data.y.item())
+            pred.append((out >= 0.5).long().item())
+        test_acc = accuracy_score(label, pred)
+        test_f1 = f1_score(label, pred)
 
-        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, '
-              f'Val: {val_acc:.4f}, Test: {test_acc:.4f}')
+        print(f'Epoch: {epoch:02d} | Train: loss: {loss:.4f}, '
+              f'acc: {train_acc:.4f}, f1: {train_f1:.4f} | '
+              f'Val: acc: {val_acc:.4f}, f1: {val_f1:.4f} | '
+              f'Test: acc: {test_acc:.4f}, f1: {test_f1:.4f}')
 
     return {
-        "acc": accuracy_score(label, pred),
-        "f1": f1_score(label, pred),
+        "acc": test_acc,
+        "f1": test_f1,
     }
