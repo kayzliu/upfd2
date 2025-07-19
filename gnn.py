@@ -30,16 +30,12 @@ class Net(torch.nn.Module):
 
         self.lin2 = Linear(hidden_channels, out_channels)
 
-    def forward(self, x, edge_index, batch):
+    def forward(self, x, edge_index):
         h = self.conv1(x, edge_index).relu()
-        h = global_max_pool(h, batch)
+        h = global_max_pool(h)
 
         if self.concat:
-            # Get the root node (tweet) features of each graph:
-            root = (batch[1:] - batch[:-1]).nonzero(as_tuple=False).view(-1)
-            root = torch.cat([root.new_zeros(1), root + 1], dim=0)
-            news = x[root]
-
+            news = x[0]
             news = self.lin0(news).relu()
             h = self.lin1(torch.cat([news, h], dim=-1)).relu()
 
@@ -76,6 +72,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             gpu=0):
     tokenizer = AutoTokenizer.from_pretrained(emb_model, padding_side='left')
     model = AutoModel.from_pretrained(emb_model, device_map='auto')
+    model.eval()
 
     train_set = UPFD2(path, name, 'train')
     val_set = UPFD2(path, name, 'val')
@@ -98,7 +95,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
 
             queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
             if len(queries) > max_edges:
-                queries = queries[:max_edges]
+                queries = queries[:max_edges+1]
                 data.edge_index = data.edge_index[:, :max_edges]
 
             batch_dict = tokenizer(
@@ -112,9 +109,9 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             batch_dict.to(model.device)
             outputs = model(**batch_dict)
             data.x = last_token_pool(outputs.last_hidden_state,
-                                         batch_dict['attention_mask'])
+                                     batch_dict['attention_mask']).detach()
 
-            out = gnn(data.x, data.edge_index, data.batch)
+            out = gnn(data.x, data.edge_index)
             loss = F.nll_loss(out, data.y)
             loss.backward()
             optimizer.step()
