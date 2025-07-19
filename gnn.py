@@ -1,11 +1,14 @@
+import os
+
 import pygod
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Linear
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GATConv, GCNConv, SAGEConv, global_max_pool
 from torch_geometric.transforms import ToUndirected
+from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
 from sklearn.metrics import accuracy_score, f1_score
 
@@ -64,50 +67,67 @@ def last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tenso
         return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 
-def text_encoder(dataset, tokenizer, model, max_content_len=500, max_edges=30, batch_size=5):
-    for data, text in enumerate(dataset):
-        text = text[:max_edges + 1]
-        data.edge_index = data.edge_index[:, :max_edges]
-        queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
-        dataloader = DataLoader(queries, batch_size=batch_size)
-        emb = []
-        for batch in dataloader:
-            batch_dict = tokenizer(
-                batch,
-                padding=True,
-                truncation=True,
-                max_length=256,
-                return_tensors="pt")
+def load_emb_dataset(path, name, emb_model="Qwen/Qwen3-Embedding-8B", max_content_len=500, max_edges=30, batch_size=5):
 
-            batch_dict.to(model.device)
-            outputs = model(**batch_dict)
-            x = last_token_pool(outputs.last_hidden_state,
-                             batch_dict['attention_mask']).detach().cpu()
-            emb.append(x)
-        data.x = torch.cat(emb, dim=0)
+    train_set = UPFD2(path, name, 'train')
+    val_set = UPFD2(path, name, 'val')
+    test_set = UPFD2(path, name, 'test')
+
+    fpath = os.path.join(path, name, f"{emb_model}_{max_content_len}_{max_edges}.pt") if path and name else ""
+    if os.path.exists(fpath):
+        set_emb = torch.load(fpath)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(emb_model,
+                                                  padding_side='left')
+        model = AutoModel.from_pretrained(emb_model, device_map='auto')
+        model.eval()
+
+        set_emb = []
+        for dataset in [train_set, val_set, test_set]:
+            data_emb = []
+            for data, text in tqdm(dataset):
+                text = text[:max_edges + 1]
+                queries = [get_instruct(i, r, max_content_len) for i, r in enumerate(text)]
+                dataloader = DataLoader(queries, batch_size=batch_size)
+                emb = []
+                for batch in dataloader:
+                    batch_dict = tokenizer(
+                        batch,
+                        padding=True,
+                        truncation=True,
+                        max_length=256,
+                        return_tensors="pt")
+
+                    batch_dict.to(model.device)
+                    outputs = model(**batch_dict)
+                    x = last_token_pool(outputs.last_hidden_state,
+                                     batch_dict['attention_mask']).detach().cpu()
+                    emb.append(x)
+                data_emb.append(torch.cat(emb, dim=0))
+            set_emb.append(data_emb)
+        torch.save(set_emb, fpath)
+        del tokenizer
+        del model
+
+    for dataset, data_emb in zip([train_set, val_set, test_set], set_emb):
+        for (data, _), emb in zip(dataset, data_emb):
+            data.x = emb
+            data.edge_index = data.edge_index[:, :max_edges]
+
+    return train_set, val_set, test_set
 
 
 def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
             gnn='SAGE',
             no_graph=False,
             no_user=False,
-            max_content_len=500,
-            max_edges=30,
             gpu=0):
-    tokenizer = AutoTokenizer.from_pretrained(emb_model, padding_side='left')
-    model = AutoModel.from_pretrained(emb_model, device_map='auto')
-    model.eval()
 
-    train_set = UPFD2(path, name, 'train')
-    val_set = UPFD2(path, name, 'val')
-    test_set = UPFD2(path, name, 'test')
+    train_set, val_set, test_set = load_emb_dataset(path, name, emb_model)
 
-    print("Encoding text data...")
-    for dataset in [train_set, val_set, test_set]:
-        text_encoder(dataset, tokenizer, model, max_content_len, max_edges)
-
-    del tokenizer
-    del model
+    # train_loader = DataLoader(train_set, batch_size=128, shuffle=True)
+    # val_loader = DataLoader(val_set, batch_size=128, shuffle=False)
+    # test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
 
     device = pygod.utils.validate_device(gpu)
 
@@ -119,7 +139,7 @@ def run_gnn(path, name, emb_model="Qwen/Qwen3-Embedding-8B",
 
         total_loss = 0
         label, pred = [], []
-        for data, text in train_set:
+        for data, _ in train_set:
             data = data.to(device)
             optimizer.zero_grad()
             out = gnn(data.x, data.edge_index)
